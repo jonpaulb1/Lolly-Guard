@@ -1,5 +1,5 @@
 {
-  "name": "Lolly Guard",
-  "description": "The official forensic AI and integrity suite for the LA Law Institute (LALI).",
+  "name": "LALI Grader",
+  "description": "The official Bar Exam Essay Grader and forensic integrity suite for the LA Law Institute (LALI).",
   "requestFramePermissions": []
 }

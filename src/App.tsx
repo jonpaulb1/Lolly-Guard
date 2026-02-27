@@ -7,6 +7,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { GoogleGenAI, Type } from "@google/genai";
 import { 
   ShieldAlert, 
   Search, 
@@ -44,7 +45,7 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-type View = 'checker' | 'plagiarism' | 'humanizer' | 'paraphraser' | 'grammar' | 'image-gen' | 'dashboard' | 'report';
+type View = 'grader' | 'checker' | 'plagiarism' | 'humanizer' | 'paraphraser' | 'grammar' | 'image-gen' | 'dashboard' | 'report';
 
 interface Submission {
   id: string;
@@ -59,8 +60,10 @@ interface Submission {
 }
 
 export default function App() {
-  const [view, setView] = useState<View>('checker');
+  const [view, setView] = useState<View>('grader');
   const [text, setText] = useState('');
+  const [referenceMaterial, setReferenceMaterial] = useState('');
+  const [referenceUrls, setReferenceUrls] = useState('');
   const [studentName, setStudentName] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -86,6 +89,167 @@ export default function App() {
     }
   };
 
+  const getAI = () => {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error("Gemini API Key is missing. Please ensure it is set in the Secrets panel.");
+    }
+    return new GoogleGenAI({ apiKey });
+  };
+
+  const performAnalysis = async (type: string, content: string) => {
+    const ai = getAI();
+    let systemInstruction = "";
+    let responseSchema: any = {};
+
+    if (type === 'grader') {
+      systemInstruction = `Bar Exam Essay Grader mode. You are a senior law professor grading a bar exam essay using the IRAC (Issue, Rule, Analysis, Conclusion) method. 
+      
+      CORE PHILOSOPHY: 
+      - Ignore FYLSX (Baby Bar) essay patterns; focus on full Bar Exam standards.
+      - Persuasiveness > Correctness: The law often has no single 'correct' answer. Value the most persuasive argument based on the facts provided.
+      - Winning Argument: Grade based on whether the student has submitted a potentially winning argument that would convince a judge or jury.
+      - Fact-Heavy Analysis: Reward students who 'wring' the facts—using every provided fact to support their legal analysis.
+      
+      CRITICAL: Recitation of 'Black Letter Law' is REQUIRED and should NOT be penalized. Precise rule statements are a hallmark of a passing essay.
+      
+      Focus your grading on:
+      1. Issue Spotting: Identification of all material legal issues.
+      2. Rule Statement: Accuracy and completeness of the Black Letter Law.
+      3. Analysis/Application: The depth, logic, and persuasiveness of applying rules to facts. This is the heart of the grade.
+      4. Conclusion: While a conclusion is necessary, its 'correctness' is secondary to the quality of the analysis that led to it.
+      
+      Compare the student's submission against the provided reference material (past exam/model answer). 
+      NOTE: If the reference material is an official Bar Model Answer, it represents the 'Gold Standard' for depth and precision.
+      Return JSON with overallGrade (e.g., 'High Pass', 'Pass', 'Marginal', 'Fail'), studentFeedback (encouraging, professional, and specific), helpfulHints (specific areas for improvement in analysis or fact-application), modelComparison (how they matched key legal points compared to the model), and potentialScore (0-100).`;
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          overallGrade: { type: Type.STRING },
+          studentFeedback: { type: Type.STRING },
+          helpfulHints: { type: Type.ARRAY, items: { type: Type.STRING } },
+          modelComparison: { type: Type.STRING },
+          potentialScore: { type: Type.NUMBER }
+        }
+      };
+    } else if (type === 'checker' || type === 'ai-detector') {
+      systemInstruction = "Forensic linguist mode. Analyze for AI generation. Return JSON with overallProbability, confidenceScore, analysisSummary, verdict, flaggedPassages (array of {text, reason, probability}), linguisticMarkers (array of {marker, finding, impact}).";
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          overallProbability: { type: Type.NUMBER },
+          confidenceScore: { type: Type.NUMBER },
+          analysisSummary: { type: Type.STRING },
+          verdict: { type: Type.STRING },
+          flaggedPassages: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                text: { type: Type.STRING },
+                reason: { type: Type.STRING },
+                probability: { type: Type.NUMBER }
+              }
+            }
+          },
+          linguisticMarkers: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                marker: { type: Type.STRING },
+                finding: { type: Type.STRING },
+                impact: { type: Type.STRING }
+              }
+            }
+          }
+        }
+      };
+    } else if (type === 'plagiarism') {
+      systemInstruction = `Plagiarism detection mode for Legal Essays. 
+      CRITICAL RULE: DO NOT count the recitation of 'Black Letter Law' (standard legal rules, statutes, definitions, or case citations) as plagiarism. These are expected to be identical across submissions.
+      ONLY flag and score plagiarism for:
+      1. Copied analysis or unique arguments.
+      2. Copied fact-application phrasing.
+      3. Verbatim copying of non-rule text from external sources or the model answer.
+      
+      Return JSON with plagiarismScore (0-100, where 0 means no non-rule plagiarism), sourcesFound (array of {source, matchPercentage, snippet}), analysisSummary (explaining what was flagged vs what was ignored as standard legal rules).`;
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          plagiarismScore: { type: Type.NUMBER },
+          analysisSummary: { type: Type.STRING },
+          sourcesFound: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                source: { type: Type.STRING },
+                matchPercentage: { type: Type.NUMBER },
+                snippet: { type: Type.STRING }
+              }
+            }
+          }
+        }
+      };
+    } else if (type === 'grammar') {
+      systemInstruction = "Grammar and style checker mode. Identify errors and suggest improvements. Return JSON with errorCount, suggestions (array of {original, suggestion, reason, type}), readabilityScore.";
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          errorCount: { type: Type.NUMBER },
+          readabilityScore: { type: Type.NUMBER },
+          suggestions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                original: { type: Type.STRING },
+                suggestion: { type: Type.STRING },
+                reason: { type: Type.STRING },
+                type: { type: Type.STRING }
+              }
+            }
+          }
+        }
+      };
+    } else if (type === 'paraphraser') {
+      systemInstruction = "Paraphrasing tool. Rewrite the text while maintaining legal precision and meaning. Return JSON with paraphrasedText, changesMadeSummary.";
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          paraphrasedText: { type: Type.STRING },
+          changesMadeSummary: { type: Type.STRING }
+        }
+      };
+    } else if (type === 'humanizer') {
+      systemInstruction = "Text humanizer. Adjust the tone and flow to sound more natural and less robotic while keeping legal accuracy. Return JSON with humanizedText, toneAdjustments.";
+      responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          humanizedText: { type: Type.STRING },
+          toneAdjustments: { type: Type.STRING }
+        }
+      };
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.1-pro-preview",
+      contents: `Task: ${type}. 
+      ${referenceMaterial ? `Reference Material (Past Exam/Model Answer): ${referenceMaterial}` : ''}
+      ${referenceUrls ? `Contextual Reference URLs: ${referenceUrls}` : ''}
+      Student Submission: ${content}`,
+      config: {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema,
+        tools: referenceUrls ? [{ urlContext: {} }] : undefined
+      }
+    });
+
+    return JSON.parse(response.text || "{}");
+  };
+
   const handleAction = async (type: View) => {
     setIsAnalyzing(true);
     setError(null);
@@ -94,28 +258,40 @@ export default function App() {
 
     try {
       if (type === 'image-gen') {
-        const res = await fetch('/api/generate-image', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prompt }),
+        const ai = getAI();
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash-image',
+          contents: [{ parts: [{ text: prompt }] }],
+          config: {
+            imageConfig: { aspectRatio: "1:1" }
+          },
         });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        setGeneratedImage(data.imageUrl);
+
+        let imageUrl = null;
+        for (const part of response.candidates[0].content.parts) {
+          if (part.inlineData) {
+            imageUrl = `data:image/png;base64,${part.inlineData.data}`;
+            break;
+          }
+        }
+        if (!imageUrl) throw new Error("No image generated");
+        setGeneratedImage(imageUrl);
       } else {
-        const res = await fetch('/api/analyze', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            text, 
-            studentName, 
-            type: type === 'checker' ? 'ai-detector' : type 
-          }),
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        setResult(data);
-        if (type === 'checker' || type === 'plagiarism') {
+        const analysisResult = await performAnalysis(type, text);
+        setResult(analysisResult);
+
+        // Save to DB for persistent tools
+        if (type === 'checker' || type === 'plagiarism' || type === 'grader') {
+          await fetch('/api/save-analysis', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              text, 
+              studentName, 
+              type: type === 'checker' ? 'ai-detector' : type,
+              result: analysisResult
+            }),
+          });
           fetchSubmissions();
         }
       }
@@ -151,13 +327,16 @@ export default function App() {
     try {
       for (const file of bulkFiles) {
         const content = await file.text();
-        await fetch('/api/analyze', {
+        const analysisResult = await performAnalysis('ai-detector', content);
+        
+        await fetch('/api/save-analysis', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ 
             text: content, 
             studentName: file.name, 
-            type: 'ai-detector' 
+            type: 'ai-detector',
+            result: analysisResult
           }),
         });
       }
@@ -165,7 +344,7 @@ export default function App() {
       fetchSubmissions();
       setView('dashboard');
     } catch (err: any) {
-      setError('Bulk processing failed at some point.');
+      setError('Bulk processing failed at some point: ' + err.message);
     } finally {
       setIsAnalyzing(false);
     }
@@ -178,6 +357,7 @@ export default function App() {
   };
 
   const tools = [
+    { id: 'grader', name: 'Bar Grader', icon: Gavel, color: 'text-lali-palm' },
     { id: 'checker', name: 'AI Detector', icon: ShieldAlert, color: 'text-lali-sunset' },
     { id: 'plagiarism', name: 'Plagiarism', icon: Search, color: 'text-lali-ocean' },
     { id: 'humanizer', name: 'Humanizer', icon: Sparkles, color: 'text-lali-gold' },
@@ -195,8 +375,8 @@ export default function App() {
             <Palmtree className="w-6 h-6 text-white" />
           </div>
           <div>
-            <span className="text-xl font-black tracking-tighter text-lali-palm block leading-none">Lolly</span>
-            <span className="text-[10px] font-bold text-lali-sunset uppercase tracking-[0.2em]">Guard</span>
+            <span className="text-xl font-black tracking-tighter text-lali-palm block leading-none">LALI</span>
+            <span className="text-[10px] font-bold text-lali-sunset uppercase tracking-[0.2em]">Grader</span>
           </div>
         </div>
         
@@ -267,8 +447,8 @@ export default function App() {
                   </h1>
                 </div>
                 <div className="hidden md:block text-right">
-                  <div className="text-3xl font-black text-lali-palm/10 tracking-tighter leading-none">LOLLY</div>
-                  <div className="text-xs font-bold text-lali-sunset tracking-[0.3em]">GUARD</div>
+                  <div className="text-3xl font-black text-lali-palm/10 tracking-tighter leading-none">LALI</div>
+                  <div className="text-xs font-bold text-lali-sunset tracking-[0.3em]">GRADER</div>
                 </div>
               </header>
 
@@ -320,14 +500,51 @@ export default function App() {
                       <textarea
                         value={text}
                         onChange={(e) => setText(e.target.value)}
-                        placeholder="Paste text here for LALI forensic analysis..."
-                        className="w-full h-[400px] p-8 focus:outline-none resize-none text-gray-800 leading-relaxed text-lg font-serif"
+                        placeholder={view === 'grader' ? "Paste student essay submission here..." : "Paste text here for LALI forensic analysis..."}
+                        className={cn(
+                          "w-full p-8 focus:outline-none resize-none text-gray-800 leading-relaxed text-lg font-serif",
+                          view === 'grader' ? "h-[300px]" : "h-[400px]"
+                        )}
                       />
-                      <div className="p-5 bg-gray-50/50 border-t border-gray-50 flex items-center justify-between">
-                        <div className="flex gap-2">
+                      
+                      {view === 'grader' && (
+                        <div className="border-t border-gray-100 grid grid-cols-1 md:grid-cols-2">
+                          <div className="border-r border-gray-100">
+                            <div className="p-5 bg-lali-sand/20 flex items-center gap-3 border-b border-gray-100">
+                              <BookOpen className="w-5 h-5 text-lali-palm" />
+                              <span className="text-xs font-black text-lali-palm uppercase tracking-widest">Reference Material</span>
+                            </div>
+                            <textarea
+                              value={referenceMaterial}
+                              onChange={(e) => setReferenceMaterial(e.target.value)}
+                              placeholder="Paste the past bar exam question or model answer here..."
+                              className="w-full h-[200px] p-8 focus:outline-none resize-none text-gray-800 leading-relaxed text-sm font-serif bg-lali-sand/5"
+                            />
+                          </div>
+                          <div>
+                            <div className="p-5 bg-lali-ocean/10 flex items-center gap-3 border-b border-gray-100">
+                              <ExternalLink className="w-5 h-5 text-lali-ocean" />
+                              <span className="text-xs font-black text-lali-ocean uppercase tracking-widest">Reference URLs (Training)</span>
+                            </div>
+                            <textarea
+                              value={referenceUrls}
+                              onChange={(e) => setReferenceUrls(e.target.value)}
+                              placeholder="Paste URLs to past exams or grading standards (one per line)..."
+                              className="w-full h-[200px] p-8 focus:outline-none resize-none text-gray-800 leading-relaxed text-sm font-serif bg-lali-ocean/5"
+                            />
+                          </div>
+                        </div>
+                      )}
+                      <div className="p-5 bg-gray-50/50 border-t border-gray-100 flex items-center justify-between">
+                        <div className="flex flex-col gap-1">
                           {bulkFiles.length > 0 && (
                             <span className="text-xs font-black text-white bg-lali-palm px-4 py-1.5 rounded-full shadow-lg shadow-lali-palm/20">
                               {bulkFiles.length} FILES
+                            </span>
+                          )}
+                          {view === 'grader' && !text.trim() && (
+                            <span className="text-[10px] font-bold text-lali-sunset animate-pulse">
+                              PASTE STUDENT ESSAY ABOVE TO BEGIN
                             </span>
                           )}
                         </div>
@@ -341,12 +558,22 @@ export default function App() {
                               onClick={() => handleAction(view)} 
                               disabled={isAnalyzing || !text.trim()} 
                               className={cn(
-                                "text-white px-10 py-4 rounded-2xl font-black shadow-xl transition-all hover:-translate-y-0.5",
+                                "text-white px-12 py-5 rounded-2xl font-black shadow-2xl transition-all hover:-translate-y-1 active:scale-95",
                                 tools.find(t => t.id === view)?.color.replace('text-', 'bg-'),
-                                "disabled:bg-gray-200 disabled:shadow-none disabled:translate-y-0"
+                                "disabled:bg-gray-200 disabled:shadow-none disabled:translate-y-0 disabled:scale-100"
                               )}
                             >
-                              {isAnalyzing ? <Loader2 className="w-6 h-6 animate-spin" /> : `RUN ${tools.find(t => t.id === view)?.name.toUpperCase()}`}
+                              {isAnalyzing ? (
+                                <div className="flex items-center gap-3">
+                                  <Loader2 className="w-6 h-6 animate-spin" />
+                                  <span>ANALYZING...</span>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-3">
+                                  {view === 'grader' ? <Gavel className="w-6 h-6" /> : <Zap className="w-6 h-6" />}
+                                  <span>{view === 'grader' ? 'GRADE STUDENT ESSAY' : `RUN ${tools.find(t => t.id === view)?.name?.toUpperCase()}`}</span>
+                                </div>
+                              )}
                             </button>
                           )}
                         </div>
@@ -375,13 +602,60 @@ export default function App() {
                       </motion.div>
                     ) : result ? (
                       <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="space-y-6">
+                        {view === 'grader' && (
+                          <div className="bg-white rounded-3xl p-10 border border-gray-100 shadow-2xl shadow-gray-200/50 relative overflow-hidden">
+                            <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-lali-palm via-lali-gold to-lali-sunset" />
+                            <div className="text-center mb-8">
+                              <div className="text-6xl font-black text-gray-900 mb-2 tracking-tighter">{result.potentialScore}%</div>
+                              <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em] mb-4">POTENTIAL SCORE</div>
+                              <div className={cn("inline-block px-6 py-2 rounded-full font-black text-sm shadow-sm", getScoreColor(result.potentialScore))}>
+                                {result.overallGrade?.toUpperCase()}
+                              </div>
+                            </div>
+                            
+                            <div className="space-y-6">
+                              <div>
+                                <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                  <MessageSquare className="w-3 h-3 text-lali-palm" /> STUDENT FEEDBACK
+                                </div>
+                                <p className="text-xs text-gray-700 leading-relaxed italic font-serif bg-lali-sand/30 p-4 rounded-xl border border-lali-palm/5">
+                                  {result.studentFeedback}
+                                </p>
+                              </div>
+
+                              <div>
+                                <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                  <Zap className="w-3 h-3 text-lali-gold" /> HELPFUL HINTS
+                                </div>
+                                <ul className="space-y-2">
+                                  {result.helpfulHints?.map((hint: string, i: number) => (
+                                    <li key={i} className="text-[10px] font-bold text-gray-600 flex items-start gap-2">
+                                      <ChevronRight className="w-3 h-3 text-lali-sunset shrink-0 mt-0.5" />
+                                      {hint}
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+
+                              <div>
+                                <div className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 flex items-center gap-2">
+                                  <Scale className="w-3 h-3 text-lali-ocean" /> MODEL COMPARISON
+                                </div>
+                                <p className="text-[10px] text-gray-500 leading-relaxed">
+                                  {result.modelComparison}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
                         {view === 'checker' && (
                           <div className="bg-white rounded-3xl p-10 border border-gray-100 shadow-2xl shadow-gray-200/50 text-center relative overflow-hidden">
                             <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-lali-sunset via-lali-gold to-lali-ocean" />
                             <div className="text-6xl font-black text-gray-900 mb-2 tracking-tighter">{result.overallProbability}%</div>
                             <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em] mb-8">AI PROBABILITY</div>
                             <div className={cn("p-5 rounded-2xl border-2 font-black text-xl mb-8 shadow-sm", getScoreColor(result.overallProbability))}>
-                              {result.verdict.toUpperCase()}
+                              {result.verdict?.toUpperCase()}
                             </div>
                             <button onClick={() => setView('dashboard')} className="w-full bg-lali-palm text-white py-4 rounded-2xl font-black hover:bg-lali-palm/90 transition-all shadow-xl shadow-lali-palm/20">
                               VIEW DASHBOARD
@@ -520,7 +794,7 @@ export default function App() {
                       <tr key={sub.id} className="hover:bg-lali-sand/10 transition-colors group">
                         <td className="px-8 py-6">
                           <div className="font-black text-gray-900">{sub.student_name}</div>
-                          <div className="text-[10px] text-gray-400 font-mono">LALI-REF: {sub.id.toUpperCase()}</div>
+                          <div className="text-[10px] text-gray-400 font-mono">LALI-REF: {sub.id?.toUpperCase()}</div>
                         </td>
                         <td className="px-8 py-6">
                           <div className="flex items-center gap-3">
@@ -570,7 +844,7 @@ export default function App() {
                     <div className="text-7xl font-black text-gray-900 mb-2 tracking-tighter">{selectedSubmission.overall_probability}%</div>
                     <div className="text-[10px] font-black text-gray-400 uppercase tracking-[0.3em] mb-8">AI PROBABILITY</div>
                     <div className={cn("p-5 rounded-2xl border-2 font-black text-xl shadow-sm", getScoreColor(selectedSubmission.overall_probability))}>
-                      {selectedSubmission.verdict.toUpperCase()}
+                      {selectedSubmission.verdict?.toUpperCase()}
                     </div>
                   </div>
                   <div className="bg-white rounded-3xl p-8 border border-gray-100 shadow-xl shadow-gray-100">
